@@ -543,11 +543,11 @@ impl PacketNumber {
     pub fn new(n: u64, largest_acked: u64) -> Self {
         let range = (n - largest_acked) * 2;
         if range < 1 << 7 {
-            PacketNumber::U8(n as u8)
+            PacketNumber::U8((n & 0x7f) as u8)
         } else if range < 1 << 14 {
-            PacketNumber::U16(n as u16)
+            PacketNumber::U16((n & 0x3fff) as u16)
         } else if range < 1 << 30 {
-            PacketNumber::U32(n as u32)
+            PacketNumber::U32((n & 0x3fffffff) as u32)
         } else {
             panic!("packet number too large to encode")
         }
@@ -892,6 +892,15 @@ mod tests {
                 assert_eq!(actual, PacketNumber::new(actual, expected).expand(expected));
             }
         }
+    }
+
+    #[test]
+    fn pn_regression_1() {
+        const LAST_ACKED: u64 = 0x6b0;
+        const PN: u64 = 0x6b1;
+        let pn = PacketNumber::new(PN, LAST_ACKED);
+        assert_eq!(PN, pn.expand(LAST_ACKED));
+        check_pn(pn, &[(PN & 0x7f) as u8]);
     }
 
     // https://github.com/quicwg/base-drafts/wiki/Test-vector-for-AES-packet-number-encryption
