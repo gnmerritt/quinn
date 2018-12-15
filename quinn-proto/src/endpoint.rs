@@ -139,22 +139,34 @@ impl Default for Config {
 /// `handle` and `timeout`.
 pub struct Endpoint {
     log: Logger,
-    rng: OsRng,
     ctx: Context,
     connection_ids_initial: FnvHashMap<ConnectionId, ConnectionHandle>,
-    connection_ids: FnvHashMap<ConnectionId, ConnectionHandle>,
     connection_remotes: FnvHashMap<SocketAddrV6, ConnectionHandle>,
     pub(crate) connections: Slab<Connection>,
-    config: Arc<Config>,
     server_config: Option<ServerConfig>,
     dirty_conns: FnvHashSet<ConnectionHandle>,
     incoming_handshakes: usize,
 }
 
 struct Context {
+    config: Arc<Config>,
+    rng: OsRng,
     io: VecDeque<Io>,
     events: VecDeque<(ConnectionHandle, Event)>,
     incoming: VecDeque<ConnectionHandle>,
+    connection_ids: FnvHashMap<ConnectionId, ConnectionHandle>,
+}
+
+impl Context {
+    fn new_cid(&mut self) -> ConnectionId {
+        loop {
+            let cid = ConnectionId::random(&mut self.rng, self.config.local_cid_len);
+            if !self.connection_ids.contains_key(&cid) {
+                break cid;
+            }
+            assert!(self.config.local_cid_len > 0);
+        }
+    }
 }
 
 /// Parameters governing incoming connections.
@@ -225,20 +237,20 @@ impl Endpoint {
         );
         Ok(Self {
             ctx: Context {
+                config,
+                rng,
                 io: VecDeque::new(),
                 // session_ticket_buffer,
                 events: VecDeque::new(),
                 incoming: VecDeque::new(),
+                connection_ids: FnvHashMap::default(),
             },
             log,
-            rng,
             connection_ids_initial: FnvHashMap::default(),
-            connection_ids: FnvHashMap::default(),
             connection_remotes: FnvHashMap::default(),
             connections: Slab::new(),
             dirty_conns: FnvHashSet::default(),
             incoming_handshakes: 0,
-            config,
             server_config,
         })
     }
@@ -276,7 +288,7 @@ impl Endpoint {
     ) {
         let datagram_len = data.len();
         while !data.is_empty() {
-            match PartialDecode::new(data, self.config.local_cid_len) {
+            match PartialDecode::new(data, self.ctx.config.local_cid_len) {
                 Ok(partial_decode) => {
                     match self.handle_decode(now, remote, ecn, partial_decode, datagram_len) {
                         Some(rest) => {
@@ -299,7 +311,7 @@ impl Endpoint {
                     // Negotiate versions
                     let mut buf = Vec::<u8>::new();
                     Header::VersionNegotiate {
-                        random: self.rng.gen(),
+                        random: self.ctx.rng.gen(),
                         src_cid: destination,
                         dst_cid: source,
                     }
@@ -335,8 +347,8 @@ impl Endpoint {
 
         let dst_cid = partial_decode.dst_cid();
         let conn = {
-            let conn = if self.config.local_cid_len > 0 {
-                self.connection_ids.get(&dst_cid)
+            let conn = if self.ctx.config.local_cid_len > 0 {
+                self.ctx.connection_ids.get(&dst_cid)
             } else {
                 None
             };
@@ -434,7 +446,7 @@ impl Endpoint {
 
         debug!(self.log, "sending stateless reset");
         let mut buf = Vec::<u8>::new();
-        let padding_len = self.rng.gen_range(
+        let padding_len = self.ctx.rng.gen_range(
             MIN_PADDING_LEN,
             // Padded packet must be smaller than the inciting packet
             inciting_packet_len - (MIN_LEN - MIN_PADDING_LEN),
@@ -442,11 +454,8 @@ impl Endpoint {
         buf.reserve_exact(1 + padding_len + RESET_TOKEN_SIZE);
         buf.resize(1 + padding_len, 0);
         buf[0] = 0b00110000; // Changes in draft 17
-        self.rng.fill_bytes(&mut buf[1..padding_len + 1]);
-        buf.extend(&reset_token_for(
-            &self.config.reset_key,
-            dst_cid,
-        ));
+        self.ctx.rng.fill_bytes(&mut buf[1..padding_len + 1]);
+        buf.extend(&reset_token_for(&self.ctx.config.reset_key, dst_cid));
 
         debug_assert!(buf.len() < inciting_packet_len);
 
@@ -464,8 +473,8 @@ impl Endpoint {
         config: &Arc<crypto::ClientConfig>,
         server_name: &str,
     ) -> Result<ConnectionHandle, ConnectError> {
-        let local_id = self.new_cid();
-        let remote_id = ConnectionId::random(&mut self.rng, MAX_CID_SIZE);
+        let local_id = self.ctx.new_cid();
+        let remote_id = ConnectionId::random(&mut self.ctx.rng, MAX_CID_SIZE);
         trace!(self.log, "initial dcid"; "value" => %remote_id);
         let conn = self.add_connection(
             remote_id,
@@ -479,16 +488,6 @@ impl Endpoint {
         )?;
         self.dirty_conns.insert(conn);
         Ok(conn)
-    }
-
-    fn new_cid(&mut self) -> ConnectionId {
-        loop {
-            let cid = ConnectionId::random(&mut self.rng, self.config.local_cid_len);
-            if !self.connection_ids.contains_key(&cid) {
-                break cid;
-            }
-            assert!(self.config.local_cid_len > 0);
-        }
     }
 
     fn add_connection(
@@ -505,18 +504,18 @@ impl Endpoint {
                 TlsSession::new_client(
                     &config.tls_config,
                     &config.server_name,
-                    &TransportParameters::new(&self.config),
+                    &TransportParameters::new(&self.ctx.config),
                 )?,
                 Some(config),
             ),
             ConnectionOpts::Server { orig_dst_cid } => {
                 let server_params = TransportParameters {
                     stateless_reset_token: Some(reset_token_for(
-                        &self.config.reset_key,
+                        &self.ctx.config.reset_key,
                         &local_id,
                     )),
                     original_connection_id: orig_dst_cid,
-                    ..TransportParameters::new(&self.config)
+                    ..TransportParameters::new(&self.ctx.config)
                 };
                 (
                     TlsSession::new_server(
@@ -530,7 +529,7 @@ impl Endpoint {
 
         let conn = self.connections.insert(Connection::new(
             self.log.new(o!("connection" => local_id)),
-            Arc::clone(&self.config),
+            Arc::clone(&self.ctx.config),
             initial_id,
             local_id,
             remote_id,
@@ -540,8 +539,8 @@ impl Endpoint {
         ));
         let conn = ConnectionHandle(conn);
 
-        if self.config.local_cid_len > 0 {
-            self.connection_ids.insert(local_id, conn);
+        if self.ctx.config.local_cid_len > 0 {
+            self.ctx.connection_ids.insert(local_id, conn);
         }
         self.connection_remotes.insert(remote, conn);
         Ok(conn)
@@ -577,7 +576,7 @@ impl Endpoint {
             debug!(self.log, "failed to authenticate initial packet");
             return;
         };
-        let loc_cid = self.new_cid();
+        let loc_cid = self.ctx.new_cid();
 
         if self.ctx.incoming.len() + self.incoming_handshakes
             == self.server_config.as_ref().unwrap().accept_buffer as usize
@@ -684,9 +683,10 @@ impl Endpoint {
             self.connection_ids_initial
                 .remove(&self.connections[conn.0].init_cid);
         }
-        if self.config.local_cid_len > 0 {
-            self.connection_ids
-                .remove(&self.connections[conn.0].loc_cid());
+        if self.ctx.config.local_cid_len > 0 {
+            for cid in self.connections[conn.0].loc_cids() {
+                self.ctx.connection_ids.remove(cid);
+            }
         }
         self.connection_remotes
             .remove(&self.connections[conn.0].remote);
@@ -996,5 +996,10 @@ impl Multiplexer for EndpointMux<'_> {
         } else {
             self.ctx.events.push_back((self.handle, event));
         }
+    }
+    fn new_cid(&mut self) -> ConnectionId {
+        let cid = self.ctx.new_cid();
+        self.ctx.connection_ids.insert(cid, self.handle);
+        cid
     }
 }
