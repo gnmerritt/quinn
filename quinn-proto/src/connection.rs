@@ -1468,7 +1468,7 @@ impl Connection {
                         stop_reason: Some(error_code),
                     };
                 }
-                Frame::RetireConnectionId { .. } => {
+                Frame::RetireConnectionId { sequence } => {
                     if self.config.local_cid_len == 0 {
                         debug!(
                             self.log,
@@ -1476,7 +1476,19 @@ impl Connection {
                         );
                         return Err(TransportError::PROTOCOL_VIOLATION);
                     }
-                    // TODO: Forget about this ID and issue a NEW_CONNECTION_ID
+                    if sequence > self.cids_issued {
+                        debug!(
+                            self.log,
+                            "got RETIRE_CONNECTION_ID for unissued cid sequence number {sequence}",
+                            sequence = sequence,
+                        );
+                        return Err(TransportError::PROTOCOL_VIOLATION);
+                    }
+                    if let Some(old) = self.loc_cids.remove(&sequence) {
+                        mux.retire_cid(&old);
+                        // Ensure the peer has a constant number of CIDs
+                        self.issue_cid(mux);
+                    }
                 }
                 Frame::NewConnectionId { .. } => {
                     if self.rem_cid.is_empty() {
@@ -2778,4 +2790,6 @@ pub trait Multiplexer {
     fn emit(&mut self, event: Event);
     /// Obtain a new local connection ID to supply to the peer.
     fn new_cid(&mut self) -> ConnectionId;
+    /// Retire an old local connection ID at the peer's request.
+    fn retire_cid(&mut self, cid: &ConnectionId);
 }

@@ -1002,4 +1002,7 @@ impl Multiplexer for EndpointMux<'_> {
         self.ctx.connection_ids.insert(cid, self.handle);
         cid
     }
+    fn retire_cid(&mut self, cid: &ConnectionId) {
+        self.ctx.connection_ids.remove(&cid);
+    }
 }
