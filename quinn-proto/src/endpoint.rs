@@ -690,6 +690,8 @@ impl Endpoint {
 
     /// Handle a timer expiring
     pub fn timeout(&mut self, now: u64, conn: ConnectionHandle, timer: Timer) {
+        let mut mux = EndpointMux::new(&mut self.ctx, conn, self.connections[conn.0].side());
+        let closed = self.connections[conn.0].timeout(&mut mux, now, timer);
         match timer {
             Timer::Close => {
                 self.ctx.io.push_back(Io::TimerStop {
@@ -697,28 +699,18 @@ impl Endpoint {
                     timer: Timer::Idle,
                 });
                 self.ctx.events.push_back((conn, Event::ConnectionDrained));
-                if self.connections[conn.0].app_closed {
+                if closed {
                     self.forget(conn);
-                } else {
-                    self.connections[conn.0].state = State::Drained;
                 }
             }
             Timer::Idle => {
-                let mut mux =
-                    EndpointMux::new(&mut self.ctx, conn, self.connections[conn.0].side());
-                self.connections[conn.0].close_common(&mut mux, now);
-                self.connections[conn.0].state = State::Draining;
                 self.ctx
                     .events
                     .push_back((conn, ConnectionError::TimedOut.into()));
                 self.dirty_conns.insert(conn); // Ensure the loss detection timer cancellation
                                                // goes through
             }
-            Timer::LossDetection => {
-                let mut mux =
-                    EndpointMux::new(&mut self.ctx, conn, self.connections[conn.0].side());
-                self.connections[conn.0].check_packet_loss(&mut mux, now);
-            }
+            _ => {}
         }
     }
 

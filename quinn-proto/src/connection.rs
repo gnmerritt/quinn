@@ -29,7 +29,7 @@ pub struct Connection {
     log: Logger,
     config: Arc<Config>,
     tls: TlsSession,
-    pub(crate) app_closed: bool,
+    app_closed: bool,
     /// DCID of Initial packet
     pub(crate) init_cid: ConnectionId,
     loc_cid: ConnectionId,
@@ -525,7 +525,27 @@ impl Connection {
         self.pending_acks.subtract(&info.acks);
     }
 
-    pub fn check_packet_loss(&mut self, mux: &mut impl Multiplexer, now: u64) {
+    pub fn timeout(&mut self, mux: &mut impl Multiplexer, now: u64, timer: Timer) -> bool {
+        match timer {
+            Timer::Close => {
+                if self.app_closed {
+                    return true;
+                } else {
+                    self.state = State::Drained;
+                }
+            }
+            Timer::Idle => {
+                self.close_common(mux, now);
+                self.state = State::Draining;
+            }
+            Timer::LossDetection => {
+                self.check_packet_loss(mux, now);
+            }
+        }
+        false
+    }
+
+    fn check_packet_loss(&mut self, mux: &mut impl Multiplexer, now: u64) {
         if self.awaiting_handshake {
             trace!(self.log, "retransmitting handshake packets");
             let packets = self
@@ -1917,7 +1937,7 @@ impl Connection {
         }
     }
 
-    pub fn close_common(&mut self, mux: &mut impl Multiplexer, now: u64) {
+    fn close_common(&mut self, mux: &mut impl Multiplexer, now: u64) {
         trace!(self.log, "connection closed");
         mux.timer_stop(Timer::LossDetection);
         mux.timer_start(Timer::Close, now + 3 * self.rto());
