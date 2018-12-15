@@ -1,4 +1,3 @@
-use std::cmp;
 use std::collections::VecDeque;
 use std::net::SocketAddrV6;
 use std::sync::Arc;
@@ -18,10 +17,7 @@ use crate::connection::{
     State,
 };
 use crate::crypto::{self, reset_token_for, ConnectError, Crypto, TlsSession, TokenKey};
-use crate::packet::{
-    ConnectionId, EcnCodepoint, Header, Packet, PacketDecodeError, PacketNumber, PartialDecode,
-    PACKET_NUMBER_32_MASK,
-};
+use crate::packet::{ConnectionId, EcnCodepoint, Header, Packet, PacketDecodeError, PartialDecode};
 use crate::stream::{ReadError, WriteError};
 use crate::transport_parameters::TransportParameters;
 use crate::{
@@ -421,36 +417,34 @@ impl Endpoint {
         remote: SocketAddrV6,
         dst_cid: &ConnectionId,
     ) {
+        /// Minimum amount of padding for the stateless reset to look like a short-header packet
+        const MIN_PADDING_LEN: usize = 20;
+        /// Minimum total length for a stateless reset packet
+        const MIN_LEN: usize = 1 + MIN_PADDING_LEN + RESET_TOKEN_SIZE;
+
+        // Prevent amplification attacks and reset loops
+        if inciting_packet_len <= MIN_LEN {
+            debug!(self.log, "ignoring unexpected {len} byte packet: not larger than minimum stateless reset size", len=inciting_packet_len);
+            return;
+        }
+
         debug!(self.log, "sending stateless reset");
         let mut buf = Vec::<u8>::new();
-        // Bound padding size to at most 8 bytes larger than input to mitigate amplification
-        // attacks
-        let header_len = 1 + MAX_CID_SIZE + 1;
-        let padding = self.rng.gen_range(
-            0,
-            cmp::max(
-                RESET_TOKEN_SIZE + 8,
-                inciting_packet_len.saturating_sub(header_len),
-            )
-                .saturating_sub(RESET_TOKEN_SIZE),
+        let padding_len = self.rng.gen_range(
+            MIN_PADDING_LEN,
+            // Padded packet must be smaller than the inciting packet
+            inciting_packet_len - (MIN_LEN - MIN_PADDING_LEN),
         );
-        buf.reserve_exact(header_len + padding + RESET_TOKEN_SIZE);
-        let number = self.rng.gen::<u32>() & PACKET_NUMBER_32_MASK | 0x4000;
-        Header::Short {
-            dst_cid: ConnectionId::random(&mut self.rng, MAX_CID_SIZE),
-            number: PacketNumber::U32(number),
-            key_phase: false,
-        }
-        .encode(&mut buf);
-
-        let padding_start = buf.len();
-        buf.resize(padding_start + padding, 0);
-        self.rng
-            .fill_bytes(&mut buf[padding_start..padding_start + padding]);
+        buf.reserve_exact(1 + padding_len + RESET_TOKEN_SIZE);
+        buf.resize(1 + padding_len, 0);
+        buf[0] = 0b00110000; // Changes in draft 17
+        self.rng.fill_bytes(&mut buf[1..padding_len + 1]);
         buf.extend(&reset_token_for(
             &self.server_config.as_ref().unwrap().reset_key,
-            &dst_cid,
+            dst_cid,
         ));
+
+        debug_assert!(buf.len() < inciting_packet_len);
 
         self.ctx.io.push_back(Io::Transmit {
             destination: remote,
