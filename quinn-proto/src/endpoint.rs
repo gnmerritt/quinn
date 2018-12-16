@@ -710,8 +710,6 @@ impl Endpoint {
                 self.ctx
                     .events
                     .push_back((conn, ConnectionError::TimedOut.into()));
-                self.dirty_conns.insert(conn); // Ensure the loss detection timer cancellation
-                                               // goes through
             }
             Timer::LossDetection => {
                 let mut mux =
