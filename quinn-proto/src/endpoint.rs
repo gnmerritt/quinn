@@ -715,6 +715,7 @@ impl Endpoint {
                 let mut mux =
                     EndpointMux::new(&mut self.ctx, conn, self.connections[conn.0].side());
                 self.connections[conn.0].check_packet_loss(&mut mux, now);
+                self.dirty_conns.insert(conn); // Connection will want to retransmit
             }
         }
     }
