@@ -540,6 +540,7 @@ impl Connection {
                 self.handshake_pending += info.retransmits;
                 self.bytes_in_flight -= info.bytes as u64;
             }
+            debug_assert!(!self.handshake_pending.is_empty());
             self.handshake_count += 1;
         } else if self.loss_time != 0 {
             // Early retransmit or Time Loss Detection
@@ -2225,6 +2226,8 @@ impl Connection {
         }
         if sent {
             self.reset_idle_timeout(mux, now);
+        } else {
+            trace!(self.log, "no packets to send");
         }
     }
 
@@ -2518,6 +2521,7 @@ impl ::std::ops::AddAssign for Retransmits {
         self.rst_stream.extend_from_slice(&rhs.rst_stream);
         self.stop_sending.extend_from_slice(&rhs.stop_sending);
         self.max_stream_data.extend(&rhs.max_stream_data);
+        self.crypto.extend(rhs.crypto.into_iter());
     }
 }
 
